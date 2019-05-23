@@ -1,0 +1,54 @@
+<configuration>
+
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <if condition='property("ENVIRONMENT").equalsIgnoreCase("production")'>
+            <then>
+                <encoder class="net.logstash.logback.encoder.LoggingEventCompositeJsonEncoder">
+                    <providers>
+                        <timestamp/>
+                        <version/>
+                        <mdc/>
+                        <pattern>
+                            <pattern>
+                                {
+                                "logger": "%logger",
+                                "level": "%level",
+                                "severity": "%level",
+                                "thread": "%thread",
+                                "message": "%message",
+                                "application": "vk-proxy",
+                                "environment": "${ENVIRONMENT}"
+                                }
+                            </pattern>
+                        </pattern>
+                        <stackTrace>
+                            <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+                                <maxLength>2048</maxLength>
+                                <exclude>sun\.reflect\..*\.invoke.*</exclude>
+                                <exclude>net\.sf\.cglib\.proxy\.MethodProxy\.invoke</exclude>
+                            </throwableConverter>
+                        </stackTrace>
+                    </providers>
+                </encoder>
+            </then>
+            <else>
+                <encoder>
+                    <pattern>%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg - mdc[ %X ]%n%ex%n</pattern>
+                </encoder>
+            </else>
+        </if>
+    </appender>
+
+    <appender name="ASYNC_STDOUT" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="STDOUT"/>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="ASYNC_STDOUT"/>
+    </root>
+
+    <logger name="org.http4s.blaze.channel.nio1" level="OFF"/>
+    <logger name="org.http4s.server.blaze.Http1ServerStage" level="OFF"/>
+    <logger name="org.http4s.client.PoolManager" level="WARN"/>
+
+</configuration>
