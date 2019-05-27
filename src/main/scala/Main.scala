@@ -1,4 +1,4 @@
-import java.io.File
+import java.io.{File, StringReader}
 import java.sql.DriverManager
 
 import cats.data.OptionT
@@ -8,12 +8,15 @@ import com.typesafe.config.ConfigFactory
 import doobie._
 import doobie.hikari.HikariTransactor
 import doobie.implicits._
+import doobie.postgres.{PFCM, PHC}
+import doobie.postgres.free.Embedded.CopyManager
 import fs2.Stream
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
 import org.http4s.HttpRoutes
 import org.http4s.dsl.io._
 import org.http4s.server.blaze.BlazeServerBuilder
 import org.http4s.server.middleware.GZip
+import org.postgresql.core.BaseConnection
 
 import scala.concurrent.duration._
 
@@ -28,8 +31,7 @@ object Main extends IOApp {
 
   private val port = config.getInt("app.port")
   private val host = config.getString("app.host")
-
-  private val dumpFilePath = config.getString("app.dump_file_path")
+  private val batchSize = config.getInt("app.batch_size")
 
   def startPool(dbName: String,
                 threadsCount: Int = 4): Resource[IO, HikariTransactor[IO]] =
@@ -88,7 +90,7 @@ object Main extends IOApp {
       .stream
       .transact(transactor)
       .map { case (a, b, c) => s"$a,$b,$c\n" }
-      .chunkN(1000, true) // I tried to find how to make chunk bigger by configuring Blaze Server,
+      .chunkN(batchSize, true) // I tried to find how to make chunk bigger by configuring Blaze Server,
       .map(_.mkString_("")) // but it just make a chunk from each element of the stream
   }
 
@@ -122,36 +124,32 @@ object Main extends IOApp {
       sql"create table if not exists dest (a int, b int, c int);".update.run
     val truncateBarTable = sql"truncate table dest;".update.run
 
-    val inserts = Stream
-      .range(1, 1000001)
-      .covary[IO]
-      .groupWithin(1000, 1.second)
-      .parEvalMap(10) { chunk =>
-        val values = chunk.toVector
-          .map { i =>
-            fr"($i, ${i % 3}, ${i % 5})"
-          }
-          .reduceLeft(_ ++ fr", " ++ _)
+    val insertsFooTable =
+      sql"""insert into source (a, b, c)
+            select generate_series, generate_series % 3, generate_series % 5
+            from generate_series(1, 1000000);""".update.run
 
-        (sql"insert into source (a, b, c) values " ++ values).update.run
-          .transact(fooTransactor)
-      }
+    val prepareFoo =
+      (createFooTable >> truncateFooTable >> insertsFooTable)
+        .transact(fooTransactor)
+    val prepareBar =
+      (createBarTable >> truncateBarTable).transact(barTransactor)
 
-    val file = new File(dumpFilePath)
-    if (file.exists) {
-      file.delete
-    }
+    val output = new java.io.ByteArrayOutputStream(64 * 1024)
 
-    val copyToFile =
-      (sql"COPY source TO '" ++ Fragment.const(dumpFilePath) ++ fr"' DELIMITER ',' CSV HEADER").update.run
-    val copyFromFile =
-      (sql"COPY dest FROM '" ++ Fragment.const(dumpFilePath) ++ fr"' DELIMITER ',' CSV HEADER").update
-        .run
+    val copyOut = PHC
+      .pgGetCopyAPI(
+        PFCM.copyOut("COPY source TO STDOUT DELIMITER ',' CSV HEADER", output))
+      .transact(fooTransactor)
 
-    (createFooTable >> truncateFooTable).transact(fooTransactor) >>
-      inserts.compile.drain >>
-      (createBarTable >> truncateBarTable).transact(barTransactor) >>
-      copyToFile.transact(fooTransactor) >>
-      copyFromFile.transact(barTransactor).void
+    for {
+      _ <- prepareFoo
+      _ <- prepareBar
+      _ <- copyOut
+      input = new java.io.ByteArrayInputStream(output.toByteArray)
+      copyIn = PHC.pgGetCopyAPI(
+        PFCM.copyIn("COPY dest FROM STDIN DELIMITER ',' CSV HEADER", input))
+      _ <- copyIn.transact(barTransactor)
+    } yield ()
   }
 }
