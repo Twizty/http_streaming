@@ -91,7 +91,7 @@ object Main extends IOApp {
       .transact(transactor)
       .map { case (a, b, c) => s"$a,$b,$c\n" }
       .chunkN(batchSize, true) // I tried to find how to make chunk bigger by configuring Blaze Server,
-      .map(_.mkString_("")) // but it just makes a chunk from each element of the stream
+      .map(_.mkString_("")) // but it just makes a chunk out of each element of the stream
   }
 
   def prepareDb: IO[Unit] = {
